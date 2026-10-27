@@ -15,3 +15,4 @@ A distributed collaborative pixel canvas
 ## Team
 - Xiang Li
 - Alexandra Descoteaux
+- William Beeker
