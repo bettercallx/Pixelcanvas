@@ -13,6 +13,7 @@ type Config struct {
 	MaxChunks     int    // cap on opened chunks, keeps Redis memory bounded (~12KB per chunk)
 	ChunkPolicy   string // new chunks added mode: adjacent or free
 	BroadcastMode string // cross-server broadcast mode: global (sharded in phase 2)
+	ConflictMode  string // sequencer or lww
 }
 
 func LoadConfig() Config {
@@ -24,6 +25,7 @@ func LoadConfig() Config {
 		MaxChunks:     getEnvInt("MAX_CHUNKS", 400),
 		ChunkPolicy:   getEnv("CHUNK_POLICY", "adjacent"),
 		BroadcastMode: getEnv("BROADCAST_MODE", "global"),
+		ConflictMode:  getEnv("CONFLICT_MODE", "sequencer"),
 	}
 }
 

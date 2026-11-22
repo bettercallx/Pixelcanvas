@@ -1,5 +1,5 @@
 // append-only log of every canvas change in a Redis Stream; William's rollback feature reads it
-// pixel entries are written by setPixelScript in canvas.go
+// pixel entries are written by the scripts in conflict.go
 // chunk_added entries by appendChunkEvent. Field names must match parseEvent below.
 package main
 
@@ -25,6 +25,9 @@ type LoggedEvent struct {
 	Timestamp int64  `json:"timestamp"`
 	CX        int    `json:"cx"`
 	CY        int    `json:"cy"`
+	Seq       int64  `json:"seq,omitempty"`
+	Lamport   uint64 `json:"lamport,omitempty"`
+	ServerID  string `json:"server_id,omitempty"`
 }
 
 // XAdd is append only, event is chunked_added
@@ -91,6 +94,8 @@ func parseEvent(m redis.XMessage) LoggedEvent {
 	num := func(k string) int { n, _ := strconv.Atoi(str(k)); return n }
 
 	ts, _ := strconv.ParseInt(str("timestamp"), 10, 64)
+	seq, _ := strconv.ParseInt(str("seq"), 10, 64)
+	lamport, _ := strconv.ParseUint(str("lamport"), 10, 64)
 	return LoggedEvent{
 		ID:        m.ID,
 		Type:      str("type"),
@@ -102,5 +107,8 @@ func parseEvent(m redis.XMessage) LoggedEvent {
 		Timestamp: ts,
 		CX:        num("cx"),
 		CY:        num("cy"),
+		Seq:       seq,
+		Lamport:   lamport,
+		ServerID:  str("server_id"),
 	}
 }

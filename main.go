@@ -27,10 +27,15 @@ func main() {
 		log.Fatal(err)
 	}
 
+	resolver, err := NewConflictResolver(cfg.ConflictMode, rdb, cfg.ServerID)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	hub := NewHub()
 	go hub.Run()
 
-	bc, err := NewBroadcaster(cfg.BroadcastMode, rdb, hub)
+	bc, err := NewBroadcaster(cfg.BroadcastMode, rdb, hub, resolver.Observe)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -38,12 +43,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	srv := &Server{canvas: canvas, policy: policy, hub: hub, bc: bc}
+	srv := &Server{canvas: canvas, resolver: resolver, policy: policy, hub: hub, bc: bc}
 	r := gin.Default()
 	srv.Routes(r)
 
-	log.Printf("server %s listening on :%s (redis=%s chunk_policy=%s broadcast=%s max_chunks=%d)",
-		cfg.ServerID, cfg.Port, cfg.RedisAddr, cfg.ChunkPolicy, cfg.BroadcastMode, cfg.MaxChunks)
+	log.Printf("server %s listening on :%s (redis=%s chunk_policy=%s broadcast=%s conflict=%s max_chunks=%d)",
+		cfg.ServerID, cfg.Port, cfg.RedisAddr, cfg.ChunkPolicy, cfg.BroadcastMode, resolver.Name(), cfg.MaxChunks)
 	if err := r.Run(":" + cfg.Port); err != nil {
 		log.Fatal(err)
 	}

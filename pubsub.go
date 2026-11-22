@@ -16,11 +16,11 @@ type Broadcaster interface {
 	Publish(ctx context.Context, cc ChunkCoord, msg []byte) error
 }
 
-// maps BROADCAST_MODE to an implementation
-func NewBroadcaster(mode string, rdb *redis.Client, hub *Hub) (Broadcaster, error) {
+// maps BROADCAST_MODE to an implementation; observe (optional) sees every received message
+func NewBroadcaster(mode string, rdb *redis.Client, hub *Hub, observe func([]byte)) (Broadcaster, error) {
 	switch mode {
 	case "global":
-		return &GlobalBroadcaster{rdb: rdb, hub: hub}, nil
+		return &GlobalBroadcaster{rdb: rdb, hub: hub, observe: observe}, nil
 	default:
 		return nil, fmt.Errorf("unknown BROADCAST_MODE %q (want global)", mode)
 	}
@@ -30,8 +30,9 @@ const globalChannel = "pixels"
 
 // GlobalBroadcaster: one channel for everything, every server receives every event
 type GlobalBroadcaster struct {
-	rdb *redis.Client
-	hub *Hub
+	rdb     *redis.Client
+	hub     *Hub
+	observe func([]byte)
 }
 
 func (b *GlobalBroadcaster) Start(ctx context.Context) error {
@@ -46,7 +47,11 @@ func (b *GlobalBroadcaster) Start(ctx context.Context) error {
 	go func() {
 		// go-redis reconnects on its own; messages published while disconnected are lost
 		for m := range sub.Channel() {
-			b.hub.Broadcast <- []byte(m.Payload)
+			msg := []byte(m.Payload)
+			if b.observe != nil {
+				b.observe(msg)
+			}
+			b.hub.Broadcast <- msg
 		}
 	}()
 	return nil

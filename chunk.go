@@ -23,6 +23,11 @@ type PixelEvent struct {
 	Color     string `json:"color"` // "#rrggbb"
 	UserID    string `json:"user_id"`
 	Timestamp int64  `json:"timestamp"` // set by server
+
+	// ordering stamp set by the ConflictResolver
+	Seq      int64  `json:"seq,omitempty"`       // sequencer
+	Lamport  uint64 `json:"lamport,omitempty"`   // lww
+	ServerID string `json:"server_id,omitempty"` // lww tie-breaker
 }
 
 type ChunkCoord struct {
