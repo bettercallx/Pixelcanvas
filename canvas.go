@@ -50,58 +50,6 @@ func (c *Canvas) IsOpen(ctx context.Context, cc ChunkCoord) (bool, error) {
 	return c.rdb.SIsMember(ctx, chunksSetKey, cc.member()).Result()
 }
 
-// setPixelScript checks the chunk is open, reads the old color, writes the new one and logs to the event log.
-// Redis runs a whole script atomically.
-var setPixelScript = redis.NewScript(`
--- KEYS[1] = canvas:chunks       set of open chunks
--- KEYS[2] = canvas:chunk:cx:cy  the pixel's chunk
--- KEYS[3] = canvas:events       event log stream
--- ARGV[1] = chunk member "cx:cy"
--- ARGV[2] = byte offset of the pixel inside the chunk
--- ARGV[3] = new color as 3 raw bytes
--- ARGV[4..7] = x, y, user_id, timestamp (only for the log)
-
--- 3 raw bytes -> "#rrggbb" (always lowercase, so colors in the log compare reliably)
-local function hex(rgb)
-  return string.format('#%02x%02x%02x', string.byte(rgb, 1, 3))
-end
-
-if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
-  return false  -- arrives in Go as redis.Nil
-end
-
-local offset = tonumber(ARGV[2])
-local old = redis.call('GETRANGE', KEYS[2], offset, offset + 2)
-redis.call('SETRANGE', KEYS[2], offset, ARGV[3])
-redis.call('XADD', KEYS[3], '*',
-  'type', 'pixel',
-  'x', ARGV[4], 'y', ARGV[5],
-  'color', hex(ARGV[3]),
-  'prev_color', hex(old),
-  'user_id', ARGV[6],
-  'timestamp', ARGV[7])
-return 1
-`)
-
-// SetPixel writes one pixel and logs it with its previous color
-func (c *Canvas) SetPixel(ctx context.Context, ev PixelEvent) error {
-	rgb, err := parseHexColor(ev.Color)
-	if err != nil {
-		return err
-	}
-	cc, offset := locate(ev.X, ev.Y)
-
-	keys := []string{chunksSetKey, cc.key(), eventStreamKey}
-	err = setPixelScript.Run(ctx, c.rdb, keys,
-		cc.member(), offset, string(rgb[:]),
-		ev.X, ev.Y, ev.UserID, ev.Timestamp,
-	).Err()
-	if errors.Is(err, redis.Nil) {
-		return ErrChunkNotOpen
-	}
-	return err
-}
-
 // GetChunk returns the RGB bytes of one chunk
 func (c *Canvas) GetChunk(ctx context.Context, cc ChunkCoord) ([]byte, error) {
 	data, err := c.rdb.Get(ctx, cc.key()).Bytes()
@@ -109,6 +57,32 @@ func (c *Canvas) GetChunk(ctx context.Context, cc ChunkCoord) ([]byte, error) {
 		return nil, ErrChunkNotOpen
 	}
 	return data, err
+}
+
+// GetChunkWithSeq also returns the global seq at read time; events with seq <= it are already in the bytes
+func (c *Canvas) GetChunkWithSeq(ctx context.Context, cc ChunkCoord) ([]byte, int64, error) {
+	var get *redis.StringCmd
+	var seq *redis.StringCmd
+	_, err := c.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
+		get = p.Get(ctx, cc.key())
+		seq = p.Get(ctx, seqKey)
+		return nil
+	})
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, 0, err
+	}
+	data, err := get.Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, 0, ErrChunkNotOpen
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	n, err := seq.Int64()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, 0, err
+	}
+	return data, n, nil
 }
 
 // AddChunk opens a new chunk. Returns false if it was already open.

@@ -1,16 +1,18 @@
 // HTTP endpoints
 // GET  /api/chunks          list open chunks             -> [{"cx":0,"cy":0}, ...]
 // GET  /api/chunk/:cx/:cy   raw RGB bytes of one chunk   -> application/octet-stream, chunkBytes long
+//                           header X-Canvas-Seq: global seq at read time
 // POST /api/chunks          open a chunk {"cx":1,"cy":0} -> 201 / 403 not allowed / 409 already open / 507 max chunks
 // GET  /ws                  websocket upgrade
 //
 // WebSocket messages (JSON, always with "type")
 // browser -> server: {"type":"pixel","x":10,"y":-3,"color":"#ff8800"}
-// server -> browser: {"type":"pixel","x":10,"y":-3,"color":"#ff8800","user_id":"...","timestamp":...}
+// server -> browser: {"type":"pixel","x":10,"y":-3,"color":"#ff8800","user_id":"...","timestamp":...,"seq":42}
+//                    (lww mode sends "lamport" and "server_id" instead of "seq"; apply only if Supersedes)
 //                    {"type":"chunk_added","cx":1,"cy":0}
 //                    {"type":"error","message":"chunk is not open"}
 //
-// pixel flow: readPump -> handleMessage -> canvas.SetPixel -> broadcaster.Publish
+// pixel flow: readPump -> handleMessage -> resolver.Apply -> broadcaster.Publish
 //             -> Redis -> every server's subscriber -> hub.Broadcast -> writePump
 
 package main
@@ -50,10 +52,11 @@ type errorMessage struct {
 
 // Server wires the modules together; handlers are its methods
 type Server struct {
-	canvas *Canvas
-	policy ChunkPolicy
-	hub    *Hub
-	bc     Broadcaster
+	canvas   *Canvas
+	resolver ConflictResolver
+	policy   ChunkPolicy
+	hub      *Hub
+	bc       Broadcaster
 }
 
 func (s *Server) Routes(r *gin.Engine) {
@@ -79,7 +82,7 @@ func (s *Server) getChunk(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cx and cy must be integers"})
 		return
 	}
-	data, err := s.canvas.GetChunk(c.Request.Context(), ChunkCoord{cx, cy})
+	data, seq, err := s.canvas.GetChunkWithSeq(c.Request.Context(), ChunkCoord{cx, cy})
 	if errors.Is(err, ErrChunkNotOpen) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
@@ -88,6 +91,7 @@ func (s *Server) getChunk(c *gin.Context) {
 		internalError(c, err)
 		return
 	}
+	c.Header("X-Canvas-Seq", strconv.FormatInt(seq, 10))
 	c.Data(http.StatusOK, "application/octet-stream", data)
 }
 
@@ -159,15 +163,20 @@ func (s *Server) handleMessage(c *Client, raw []byte) {
 		ev := msg.PixelEvent
 		ev.UserID = c.ID
 		ev.Timestamp = time.Now().UnixMilli()
+		ev.Seq, ev.Lamport, ev.ServerID = 0, 0, "" // never trust stamps from the browser
 
 		ctx, cancel := context.WithTimeout(context.Background(), redisTimeout)
 		defer cancel()
 
-		if err := s.canvas.SetPixel(ctx, ev); err != nil {
-			if errors.Is(err, ErrChunkNotOpen) || errors.Is(err, ErrInvalidColor) {
+		ev, err := s.resolver.Apply(ctx, ev)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrStaleWrite):
+				// the winning write is already being broadcast
+			case errors.Is(err, ErrChunkNotOpen) || errors.Is(err, ErrInvalidColor):
 				s.sendError(c, err.Error())
-			} else {
-				log.Printf("SetPixel from %s: %v", c.ID, err)
+			default:
+				log.Printf("Apply from %s: %v", c.ID, err)
 				s.sendError(c, "server error")
 			}
 			return
