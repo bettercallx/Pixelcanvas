@@ -67,3 +67,4 @@ Each entry has both `color` and `prev_color`, so either rollback style works:
 ## Team
 - Xiang Li
 - Alexandra Descoteaux
+- William Beeker
