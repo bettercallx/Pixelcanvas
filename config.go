@@ -16,6 +16,7 @@ type Config struct {
 	ConflictMode  string // sequencer or lww
 }
 
+// default server config, can be overridden through docker `PORT=9090 go run .`
 func LoadConfig() Config {
 	host, _ := os.Hostname()
 	return Config{

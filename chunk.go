@@ -10,11 +10,9 @@ import (
 
 const (
 	ChunkSize     = 64 // 64x64 pixels per chunk
-	bytesPerPixel = 3  // R, G, B
+	bytesPerPixel = 3  // R, G, B each 1 byte for 0x00-0xFF
 	chunkBytes    = ChunkSize * ChunkSize * bytesPerPixel
 )
-
-var ErrInvalidColor = errors.New("invalid color, want #rrggbb")
 
 // single pixel
 type PixelEvent struct {
@@ -30,6 +28,7 @@ type PixelEvent struct {
 	ServerID string `json:"server_id,omitempty"` // lww tie-breaker
 }
 
+// the coordinates of a chunk
 type ChunkCoord struct {
 	CX int `json:"cx"`
 	CY int `json:"cy"`
@@ -38,7 +37,7 @@ type ChunkCoord struct {
 func (c ChunkCoord) member() string { return fmt.Sprintf("%d:%d", c.CX, c.CY) }
 func (c ChunkCoord) key() string    { return "canvas:chunk:" + c.member() }
 
-// the 4 chunks sharing an edge with c
+// adjacent mode: the 4 chunks sharing an edge with c
 func (c ChunkCoord) Neighbors() [4]ChunkCoord {
 	return [4]ChunkCoord{
 		{c.CX - 1, c.CY}, {c.CX + 1, c.CY},
@@ -48,19 +47,24 @@ func (c ChunkCoord) Neighbors() [4]ChunkCoord {
 
 // locate maps a global pixel coordinate to its chunk and byte offset inside that chunk
 func locate(x, y int) (ChunkCoord, int64) {
+	// which chunk contians this pixel
 	cc := ChunkCoord{floorDiv(x, ChunkSize), floorDiv(y, ChunkSize)}
+	// byte offset of this pixel inside the chunk
+	// opens chunk (0,0) on first start
 	lx, ly := x-cc.CX*ChunkSize, y-cc.CY*ChunkSize
 	return cc, int64((ly*ChunkSize + lx) * bytesPerPixel)
 }
 
 // floorDiv rounds toward negative infinity; Go's / rounds toward zero (-1/64 == 0)
-func floorDiv(a, b int) int {
-	q := a / b
-	if a%b != 0 && a < 0 {
+func floorDiv(a, ChunkSize int) int {
+	q := a / ChunkSize
+	if a%ChunkSize != 0 && a < 0 {
 		q--
 	}
 	return q
 }
+
+var ErrInvalidColor = errors.New("invalid color, want #rrggbb")
 
 // "#ff8800" -> [0xff, 0x88, 0x00]
 func parseHexColor(s string) ([3]byte, error) {
