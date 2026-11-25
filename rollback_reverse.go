@@ -11,8 +11,6 @@ import (
 // ReverseUndoRollback restores events newer than targetID in newest-first
 // order, using PrevColor for pixel events. targetID is inclusive: the canvas
 // is left in the state immediately after that event.
-//
-// TODO: handle writes while Rollback runs, publish WebSocket updates or append compensating events to the stream.
 type ReverseUndoRollback struct {
 	canvas *Canvas
 	log    *EventLog
@@ -107,7 +105,7 @@ func (r *ReverseUndoRollback) Rollback(ctx context.Context, targetID string) (re
 			}
 		}
 
-		if keepAliveErr := stopKeepAlive(); keepAliveErr != nil && retErr == nil {
+		if keepAliveErr := stopKeepAlive(); keepAliveErr != nil && retErr == nil && !published {
 			retErr = fmt.Errorf("rollback lock renewal failed: %w", keepAliveErr)
 		}
 
