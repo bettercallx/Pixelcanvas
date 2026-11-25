@@ -16,7 +16,7 @@ const eventStreamKey = "canvas:events"
 // chunk_added events use CX/CY.
 type LoggedEvent struct {
 	ID        string `json:"id"`   // stream ID "<ms>-<seq>" from Redis' clock: one global order across servers
-	Type      string `json:"type"` // "pixel" / "chunk_added"
+	Type      string `json:"type"` // "pixel" / "chunk_added" / "rollback"
 	X         int    `json:"x"`    // 0 is valid
 	Y         int    `json:"y"`
 	Color     string `json:"color"`
@@ -28,6 +28,7 @@ type LoggedEvent struct {
 	Seq       int64  `json:"seq,omitempty"`
 	Lamport   uint64 `json:"lamport,omitempty"`
 	ServerID  string `json:"server_id,omitempty"`
+	TargetID  string `json:"target_id,omitempty"` //ID targeted by rollback
 }
 
 // XAdd is append only, event is chunked_added
@@ -36,6 +37,13 @@ func appendChunkEvent(ctx context.Context, p redis.Pipeliner, cc ChunkCoord) {
 	p.XAdd(ctx, &redis.XAddArgs{
 		Stream: eventStreamKey,
 		Values: []any{"type", "chunk_added", "cx", cc.CX, "cy", cc.CY},
+	})
+}
+
+func appendRollbackEvent(ctx context.Context, p redis.Pipeliner, targetID string) {
+	p.XAdd(ctx, &redis.XAddArgs{
+		Stream: eventStreamKey,
+		Values: []any{"type", "rollback", "target_id", targetID},
 	})
 }
 
@@ -110,5 +118,6 @@ func parseEvent(m redis.XMessage) LoggedEvent {
 		Seq:       seq,
 		Lamport:   lamport,
 		ServerID:  str("server_id"),
+		TargetID:  str("target_id"),
 	}
 }
