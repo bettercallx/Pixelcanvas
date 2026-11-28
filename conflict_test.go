@@ -101,7 +101,9 @@ func TestSequencerApply(t *testing.T) {
 	ctx := context.Background()
 
 	for i, color := range []string{"#ff0000", "#00ff00", "#0000ff"} {
-		ev, err := r.Apply(ctx, px(1, 2, color))
+		ev := px(1, 2, color)
+
+		ev, err := r.Apply(ctx, ev)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -109,6 +111,7 @@ func TestSequencerApply(t *testing.T) {
 			t.Errorf("write %d got seq %d, want %d", i, ev.Seq, i+1)
 		}
 	}
+
 	if got := pixelColor(t, canvas, 1, 2); got != "#0000ff" {
 		t.Errorf("pixel = %s, want #0000ff", got)
 	}
@@ -127,11 +130,14 @@ func TestSequencerApply(t *testing.T) {
 		t.Errorf("GetChunkWithSeq seq = %d, %v; want 3", seq, err)
 	}
 
-	if _, err := r.Apply(ctx, px(500, 500, "#000000")); !errors.Is(err, ErrChunkNotOpen) {
-		t.Errorf("write to closed chunk: err = %v, want ErrChunkNotOpen", err)
+	_, closedErr := r.Apply(ctx, px(500, 500, "#000000"))
+	if !errors.Is(closedErr, ErrChunkNotOpen) {
+		t.Errorf("closed chunk error = %v, want %v", closedErr, ErrChunkNotOpen)
 	}
-	if _, err := r.Apply(ctx, px(0, 0, "red")); !errors.Is(err, ErrInvalidColor) {
-		t.Errorf("bad color: err = %v, want ErrInvalidColor", err)
+
+	_, colorErr := r.Apply(ctx, px(0, 0, "red"))
+	if !errors.Is(colorErr, ErrInvalidColor) {
+		t.Errorf("invalid color error = %v, want %v", colorErr, ErrInvalidColor)
 	}
 }
 

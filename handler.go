@@ -50,6 +50,11 @@ type errorMessage struct {
 	Message string `json:"message"`
 }
 
+type rollbackMessage struct {
+	Type     string `json:"type"`
+	TargetID string `json:"target_id"`
+}
+
 // Server wires the modules together; handlers are its methods
 type Server struct {
 	canvas   *Canvas
@@ -57,12 +62,14 @@ type Server struct {
 	policy   ChunkPolicy
 	hub      *Hub
 	bc       Broadcaster
+	rollback *ReverseUndoRollback
 }
 
 func (s *Server) Routes(r *gin.Engine) {
 	r.GET("/api/chunks", s.listChunks)
 	r.GET("/api/chunk/:cx/:cy", s.getChunk)
 	r.POST("/api/chunks", s.addChunk)
+	r.POST("/api/rollback", s.rollbackCanvas)
 	r.GET("/ws", s.serveWS)
 }
 
@@ -135,6 +142,57 @@ func (s *Server) addChunk(c *gin.Context) {
 	c.JSON(http.StatusCreated, cc)
 }
 
+func (s *Server) rollbackCanvas(c *gin.Context) {
+	var req struct {
+		TargetID string `json:"target_id"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "body must contain a target_id"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
+	defer cancel()
+
+	if err := s.rollback.Rollback(ctx, req.TargetID); err != nil {
+		if errors.Is(err, ErrInvalidRollbackTarget) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		if errors.Is(err, ErrUnsupportedEvent) {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			return
+		}
+
+		log.Printf("rollback to %s failed: %v", req.TargetID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "rollback failed"})
+		return
+	}
+
+	// The rollback has committed. Notify every application server.
+	msg, err := json.Marshal(rollbackMessage{
+		Type:     "rollback",
+		TargetID: req.TargetID,
+	})
+	if err != nil {
+		log.Printf("marshal rollback notification: %v", err)
+	} else {
+		publishCtx, publishCancel := context.WithTimeout(context.Background(), redisTimeout)
+		defer publishCancel()
+
+		if err := s.bc.Publish(publishCtx, ChunkCoord{}, msg); err != nil {
+			log.Printf("publish rollback notification: %v", err)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":    "rolled_back",
+		"target_id": req.TargetID,
+	})
+}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
@@ -173,7 +231,9 @@ func (s *Server) handleMessage(c *Client, raw []byte) {
 			switch {
 			case errors.Is(err, ErrStaleWrite):
 				// the winning write is already being broadcast
-			case errors.Is(err, ErrChunkNotOpen) || errors.Is(err, ErrInvalidColor):
+			case errors.Is(err, ErrChunkNotOpen) ||
+				errors.Is(err, ErrInvalidColor) ||
+				errors.Is(err, ErrRollbackInProgress):
 				s.sendError(c, err.Error())
 			default:
 				log.Printf("Apply from %s: %v", c.ID, err)

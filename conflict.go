@@ -58,22 +58,31 @@ type SequencerResolver struct {
 func (r *SequencerResolver) Name() string { return "sequencer" }
 
 var sequencerScript = redis.NewScript(`
--- KEYS: chunks set, chunk, events stream, seq counter
--- ARGV: chunk member, byte offset, 3 raw color bytes, x, y, user_id, timestamp
-
 local function hex(rgb)
   return string.format('#%02x%02x%02x', string.byte(rgb, 1, 3))
 end
 
-if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+if redis.call('EXISTS', KEYS[4]) == 1 then
+  return -1
+end
+
+local version = redis.call('GET', KEYS[1])
+if not version then
+  return redis.error_reply('canvas active version is not initialized')
+end
+
+local chunksKey = 'canvas:v' .. version .. ':chunks'
+local chunkKey = 'canvas:v' .. version .. ':chunk:' .. ARGV[1]
+
+if redis.call('SISMEMBER', chunksKey, ARGV[1]) == 0 then
   return false
 end
 
-local seq = redis.call('INCR', KEYS[4])
+local seq = redis.call('INCR', KEYS[3])
 local offset = tonumber(ARGV[2])
-local old = redis.call('GETRANGE', KEYS[2], offset, offset + 2)
-redis.call('SETRANGE', KEYS[2], offset, ARGV[3])
-redis.call('XADD', KEYS[3], '*',
+local old = redis.call('GETRANGE', chunkKey, offset, offset + 2)
+redis.call('SETRANGE', chunkKey, offset, ARGV[3])
+redis.call('XADD', KEYS[2], '*',
   'type', 'pixel',
   'x', ARGV[4], 'y', ARGV[5],
   'color', hex(ARGV[3]),
@@ -91,7 +100,7 @@ func (r *SequencerResolver) Apply(ctx context.Context, ev PixelEvent) (PixelEven
 	}
 	cc, offset := locate(ev.X, ev.Y)
 
-	keys := []string{chunksSetKey, cc.key(), eventStreamKey, seqKey}
+	keys := []string{activeVersionKey, eventStreamKey, seqKey, rollbackLockKey}
 	seq, err := sequencerScript.Run(ctx, r.rdb, keys,
 		cc.member(), offset, string(rgb[:]),
 		ev.X, ev.Y, ev.UserID, ev.Timestamp,
@@ -101,6 +110,9 @@ func (r *SequencerResolver) Apply(ctx context.Context, ev PixelEvent) (PixelEven
 	}
 	if err != nil {
 		return ev, err
+	}
+	if seq == -1 {
+		return ev, ErrRollbackInProgress
 	}
 	ev.Seq = seq
 	return ev, nil
@@ -122,19 +134,32 @@ func clockKey(cc ChunkCoord) string { return "canvas:clock:" + cc.member() }
 
 // writes only if the stamp beats the stored one; returns {1}, or {0, stored stamp}
 var lwwScript = redis.NewScript(`
--- KEYS: chunks set, chunk, events stream, chunk's clock hash
+-- KEYS: active version, events stream, rollback lock
 -- ARGV: chunk member, byte offset, 3 raw color bytes, lamport, server_id, x, y, user_id, timestamp
 
 local function hex(rgb)
   return string.format('#%02x%02x%02x', string.byte(rgb, 1, 3))
 end
 
-if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+if redis.call('EXISTS', KEYS[3]) == 1 then
+  return {-1}
+end
+
+local version = redis.call('GET', KEYS[1])
+if not version then
+  return redis.error_reply('canvas active version is not initialized')
+end
+
+local chunksKey = 'canvas:v' .. version .. ':chunks'
+local chunkKey = 'canvas:v' .. version .. ':chunk:' .. ARGV[1]
+local clockKey = 'canvas:v' .. version .. ':clock:' .. ARGV[1]
+
+if redis.call('SISMEMBER', chunksKey, ARGV[1]) == 0 then
   return false
 end
 
 local lamport = tonumber(ARGV[4])
-local stored = redis.call('HGET', KEYS[4], ARGV[2])
+local stored = redis.call('HGET', clockKey, ARGV[2])
 if stored then
   local sep = string.find(stored, ':', 1, true)
   local sl = tonumber(string.sub(stored, 1, sep - 1))
@@ -145,10 +170,10 @@ if stored then
 end
 
 local offset = tonumber(ARGV[2])
-local old = redis.call('GETRANGE', KEYS[2], offset, offset + 2)
-redis.call('SETRANGE', KEYS[2], offset, ARGV[3])
-redis.call('HSET', KEYS[4], ARGV[2], ARGV[4] .. ':' .. ARGV[5])
-redis.call('XADD', KEYS[3], '*',
+local old = redis.call('GETRANGE', chunkKey, offset, offset + 2)
+redis.call('SETRANGE', chunkKey, offset, ARGV[3])
+redis.call('HSET', clockKey, ARGV[2], ARGV[4] .. ':' .. ARGV[5])
+redis.call('XADD', KEYS[2], '*',
   'type', 'pixel',
   'x', ARGV[6], 'y', ARGV[7],
   'color', hex(ARGV[3]),
@@ -170,7 +195,7 @@ func (r *LWWResolver) Apply(ctx context.Context, ev PixelEvent) (PixelEvent, err
 	ev.Lamport = r.clock.Tick()
 	ev.ServerID = r.serverID
 
-	keys := []string{chunksSetKey, cc.key(), eventStreamKey, clockKey(cc)}
+	keys := []string{activeVersionKey, eventStreamKey, rollbackLockKey}
 	res, err := lwwScript.Run(ctx, r.rdb, keys,
 		cc.member(), offset, string(rgb[:]),
 		ev.Lamport, ev.ServerID,
@@ -181,6 +206,11 @@ func (r *LWWResolver) Apply(ctx context.Context, ev PixelEvent) (PixelEvent, err
 	}
 	if err != nil {
 		return ev, err
+	}
+	if len(res) > 0 {
+		if status, ok := res[0].(int64); ok && status == -1 {
+			return ev, ErrRollbackInProgress
+		}
 	}
 	if won, _ := res[0].(int64); won == 1 {
 		return ev, nil

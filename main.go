@@ -22,6 +22,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	eventLog := NewEventLog(rdb)
+	rollback := &ReverseUndoRollback{
+		canvas: canvas,
+		log:    eventLog,
+	}
 	policy, err := NewChunkPolicy(cfg.ChunkPolicy, canvas)
 	if err != nil {
 		log.Fatal(err)
@@ -43,7 +49,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	srv := &Server{canvas: canvas, resolver: resolver, policy: policy, hub: hub, bc: bc}
+	srv := &Server{canvas: canvas, resolver: resolver, policy: policy, hub: hub, bc: bc, rollback: rollback}
 	r := gin.Default()
 	srv.Routes(r)
 
